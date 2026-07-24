@@ -641,7 +641,8 @@ class Consumer:
                pipe: multiprocessing.connection.Connection = None,
                heartbeat: int = 60,
                max_runtime: datetime.timedelta = None,
-               max_nmsgs: int = None
+               max_nmsgs: int = None,
+               exception_on_no_callback: bool = False
                ) -> dict:
         """Open the stream in a background thread and process messages through the callbacks.
 
@@ -665,6 +666,10 @@ class Consumer:
                 If not None, stop after running this long.
             max_nmsgs : int, default None
                 If not None, stop after receiving this many messages.
+            exception_on_no_callback : bool, default False
+                Normally, if the Consumer has no batch_callback, then when you call this function
+                it will just (more or less) sleep, since there's nothing for it to do.  Set
+                exception_on_no_callback to True to have it raise an exception if there's no callback.
 
         Returns:
             dict:
@@ -688,7 +693,8 @@ class Consumer:
 
         try:
             return self._process_batches( pipe=pipe, heartbeat=heartbeat,
-                                          max_runtime=max_runtime, max_nmsgs=max_nmsgs )
+                                          max_runtime=max_runtime, max_nmsgs=max_nmsgs,
+                                          exception_on_no_callback=exception_on_no_callback )
 
         # catch all exceptions and attempt to close the stream before raising
         except (KeyboardInterrupt, Exception):
@@ -722,7 +728,8 @@ class Consumer:
         else:
             message.nack()
 
-    def _drain_queue( self, batch: list = [] ) -> int:
+    def _drain_queue( self, batch: list = None ) -> int:
+        batch = batch if batch is not None else []
         while not self._queue.empty():
             batch.append( self._queue.get( block=True ) )
             self._queue.task_done()
@@ -735,7 +742,8 @@ class Consumer:
                          pipe: multiprocessing.connection.Connection = None,
                          heartbeat: int = 60,
                          max_runtime: datetime.timedelta = None,
-                         max_nmsgs: int = None
+                         max_nmsgs: int = None,
+                         exception_on_no_callback: bool = False
                          ) -> dict:
         """Run the batch callback if provided, otherwise just sleep.
 
@@ -747,20 +755,20 @@ class Consumer:
 
         # if there's no batch_callback there's nothing to do except wait until the process is killed
         if self.batch_callback is None:
-            # self.logger.warning( "There's no batch_callback, so _process_batches isn't doing anything!" )
-            raise RuntimeError( "There's no batch_callback, so _process_batches won't do anything!" )
-            t0 = datetime.datetime.now()
-            while True:
-                time.sleep( heartbeat )
-                if pipe is not None:
-                    if pipe.poll():
-                        msg = pipe.recv()
-                        if ( 'command' in msg ) and ( msg['command'] == 'die' ):
-                            self.stop()
-                            return { "status": "die", "nconsumed": 0 }
-                    pipe.send( { "message": "ok", "nconsumed": 0, "runtime": datetime.datetime.now() - t0 } )
-            # This next line should never actually be run
-            return { "status": "unknown", "nconsumed": 0 }
+            if exception_on_no_callback:
+                raise RuntimeError( "There's no batch_callback, so _process_batches won't do anything!" )
+            else:
+                self.logger.warning( "There's no batch_callback, so _process_batches isn't doing anything!" )
+                t0 = datetime.datetime.now()
+                while True:
+                    time.sleep( heartbeat )
+                    if pipe is not None:
+                        if pipe.poll():
+                            msg = pipe.recv()
+                            if ( 'command' in msg ) and ( msg['command'] == 'die' ):
+                                self.stop()
+                                return { "status": "die", "nconsumed": 0 }
+                        pipe.send( { "message": "ok", "nconsumed": 0, "runtime": datetime.datetime.now() - t0 } )
 
         batch, count = [], 0
         totprocessed = 0
